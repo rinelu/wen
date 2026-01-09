@@ -11,42 +11,76 @@ typedef struct {
 
     unsigned char out[1024];
     unsigned long out_len;
+
+    int closed;
+    int handshake_kick;
 } fake_io;
 
-static long fake_read(void *user, void *buf, unsigned long len) {
+static long fake_read(void *user, void *buf, unsigned long len)
+{
     fake_io *io = user;
+    if (io->closed) return 0; // EOF
+
+    if (!io->handshake_kick) {
+        io->handshake_kick = 1;
+        ((unsigned char *)buf)[0] = 0;
+        return 1;
+    }
 
     unsigned long remaining = io->in_len - io->in_pos;
+    if (remaining == 0) return -1;
+
     unsigned long n = WEN_MIN(len, remaining);
-
-    if (n == 0)
-        return 0;
-
     memcpy(buf, io->in + io->in_pos, n);
     io->in_pos += n;
+
     return (long)n;
 }
 
-static long fake_write(void *user, const void *buf, unsigned long len) {
+static long fake_write(void *user, const void *buf, unsigned long len)
+{
     fake_io *io = user;
 
-    if (len > sizeof(io->out) - io->out_len)
-        return -1;
+    if (io->closed) return -1;
+    if (len > sizeof(io->out) - io->out_len) return -1;
 
     memcpy(io->out + io->out_len, buf, len);
     io->out_len += len;
+
     return (long)len;
 }
 
-static wen_result null_handshake(void *state, const void *in, unsigned long in_len, void *out, unsigned long out_cap, unsigned long *out_len) {
-    WEN_UNUSED(state);
+static wen_handshake_status null_handshake(void *codec_state, const void *in, unsigned long in_len,
+                                           unsigned long *consumed,
+                                           void *out, unsigned long out_cap, unsigned long *out_len)
+{
+    WEN_UNUSED(codec_state);
     WEN_UNUSED(in);
-    WEN_UNUSED(in_len);
     WEN_UNUSED(out);
     WEN_UNUSED(out_cap);
 
+    if (in_len == 0) {
+        *consumed = 0;
+        *out_len = 0;
+        return WEN_HANDSHAKE_INCOMPLETE;
+    }
+
+    *consumed = in_len;
     *out_len = 0;
-    return WEN_OK;
+    return WEN_HANDSHAKE_COMPLETE;
+}
+
+
+static void fake_feed(fake_io *io, const void *data, unsigned long len)
+{
+    assert(len <= sizeof(io->in) - io->in_len);
+    memcpy(io->in + io->in_len, data, len);
+    io->in_len += len;
+}
+
+static void fake_close(fake_io *io)
+{
+    io->closed = 1;
 }
 
 static wen_result null_decode(void *state, const void *data, unsigned long len) {
@@ -56,22 +90,37 @@ static wen_result null_decode(void *state, const void *data, unsigned long len) 
     return WEN_OK;
 }
 
-static wen_result null_encode(void *state, unsigned opcode, const void *data, unsigned long len) {
-    WEN_UNUSED(state);
+static wen_result null_encode(void *codec_state, unsigned opcode, const void *data, unsigned long len,
+                              void *out, unsigned long out_cap, unsigned long *out_len) {
+    WEN_UNUSED(codec_state);
     WEN_UNUSED(opcode);
     WEN_UNUSED(data);
     WEN_UNUSED(len);
+    WEN_UNUSED(out);
+    WEN_UNUSED(out_cap);
+
+    *out_len = 0;
     return WEN_OK;
 }
 
-static const wen_codec null_codec = {.name = "null", .handshake = null_handshake, .decode = null_decode, .encode = null_encode};
+static const wen_codec null_codec = {
+    .name = "null",
+    .handshake = null_handshake,
+    .decode = null_decode,
+    .encode = null_encode
+};
 
-int main(void) {
+int main(void)
+{
     fake_io fio = {0};
     wen_link link;
     wen_event ev;
 
-    wen_io io = {.user = &fio, .read = fake_read, .write = fake_write};
+    wen_io io = {
+        .user  = &fio,
+        .read  = fake_read,
+        .write = fake_write
+    };
 
     assert(wen_link_init(&link, io) == WEN_OK);
     printf("Link initialized.\n");
@@ -79,21 +128,33 @@ int main(void) {
     wen_link_attach_codec(&link, &null_codec, NULL);
     printf("Codec attached.\n");
 
-    assert(wen_poll(&link, &ev) == 1);
+    while (!wen_poll(&link, &ev));
+
     assert(ev.type == WEN_EV_OPEN);
-    printf("Connection opened: Event type = %d\n", ev.type);
+    printf("Connection opened.\n");
 
-    // Setup input data
-    memcpy(fio.in, "hello", 5);
-    fio.in_len = 5;
+    fake_feed(&fio, "hello", 5);
+    while (!wen_poll(&link, &ev));
 
-    // First poll after putting data in
-    assert(wen_poll(&link, &ev) >= 0);
-    printf("First poll completed.\n");
+    assert(ev.type == WEN_EV_SLICE);
+    printf("Received slice: %.*s\n",
+           (int)ev.as.slice.len,
+           (const char *)ev.as.slice.data);
 
-    // Close the link and check for success
-    assert(wen_close(&link, 1000) == WEN_OK);
-    printf("Link closed.\n");
+    wen_release(&link, ev.as.slice);
+    fake_close(&fio);
+
+    for (;;) {
+        if (!wen_poll(&link, &ev)) continue;
+        if (ev.type == WEN_EV_CLOSE) break;
+    }
+    assert(ev.type == WEN_EV_CLOSE);
+
+    printf("Connection closed.\n");
+
+    assert(wen_close(&link, 1000, WEN_WS_OP_CLOSE) == WEN_OK);
+    printf("Link shutdown complete.\n");
 
     return 0;
 }
+

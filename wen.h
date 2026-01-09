@@ -1,4 +1,4 @@
-/* wen - v0.1.0 - Public Domain - https://github.com/rinelu/wen
+/* wen - v0.2.0 - Public Domain - https://github.com/rinelu/wen
 
    wen is a deterministic, zero-allocation networking core
    focused on explicit lifetimes and user-managed I/O.
@@ -62,6 +62,9 @@
      All temporary allocations use a user-owned arena (wen_arena).
      Slices returned to the user remain valid until wen_release() is called.
      Individual allocations cannot be freed; arenas are reset in bulk.
+     At most one slice event may be outstanding at any time.
+     The caller must call wen_release() before the next slice can be produced.
+     Incoming data may be buffered until the slice is released.
 
      If WEN_NO_MALLOC is enabled, no calls to malloc/free/realloc are made.
 
@@ -87,11 +90,8 @@
      ## Flags
 
         - WEN_NO_MALLOC - Disable all dynamic memory usage inside wen.
-          Default: 1
         - WEN_DETERMINISTIC - Enforce deterministic behavior. Non-deterministic code paths become unreachable.
-          Default: 0
         - WEN_ENABLE_WS - Enable the built-in WebSocket codec (if provided).
-          Default: 1
 
      ## Size Limits
 
@@ -100,7 +100,6 @@
         - WEN_TX_BUFFER - Internal transmit buffer size per link.
 
         These are compile-time constants and must be large enough for your protocol.
-
 */
 
 #ifndef WEN_H_
@@ -110,9 +109,10 @@
 #include <string.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #define WEN_VMAJOR 0
-#define WEN_VMINOR 1
+#define WEN_VMINOR 2
 #define WEN_VPATCH 0
 
 // Convert version to a single integer.
@@ -123,18 +123,15 @@
 #define WEN_VSTRING WEN_STR(WEN_VMAJOR)"." WEN_STR(WEN_VMINOR)"." WEN_STR(WEN_VPATCH)
 
 // Disables all dynamic memory usage inside wen.
-#ifndef WEN_NO_MALLOC
-#    define WEN_NO_MALLOC 1
+#ifdef WEN_NO_MALLOC
 #endif
 
 // Enables deterministic behavior
-#ifndef WEN_DETERMINISTIC
-#    define WEN_DETERMINISTIC 0
+#ifdef WEN_DETERMINISTIC
 #endif
 
 // Enables the built-in WebSocket codec.
-#ifndef WEN_ENABLE_WS
-#    define WEN_ENABLE_WS 1
+#ifdef WEN_ENABLE_WS
 #endif
 
 // Maximum size of a slice returned to the user.
@@ -152,14 +149,32 @@
 #    define WEN_TX_BUFFER 8192
 #endif
 
+// Maximum number of events that can be queued internally
+#ifndef WEN_EVENT_QUEUE_CAP
+#    define WEN_EVENT_QUEUE_CAP 16
+#endif
+
 #ifndef WENDEF
 #    define WENDEF static inline
 #endif
 
-#if defined(_WIN32) || defined(_WIN64)
-#    define WEN_PLATFORM_WINDOWS 1
+#ifdef WEN_WARN_DEPRECATED
+#    ifndef WEN_DEPRECATED
+#        if defined(__GNUC__) || defined(__clang__)
+#            define WEN_DEPRECATED(message) __attribute__((deprecated(message)))
+#        elif defined(_MSC_VER)
+#            define WEN_DEPRECATED(message) __declspec(deprecated(message))
+#        else
+#            define WEN_DEPRECATED(...)
+#        endif
+#    endif /* WEN_DEPRECATED */
 #else
-#    define WEN_PLATFORM_POSIX 1
+#    define WEN_DEPRECATED(...)
+#endif /* WEN_WARN_DEPRECATED */
+
+#ifndef WEN_ASSERT
+#   include <assert.h>
+#   define WEN_ASSERT assert
 #endif
 
 #define WEN_UNUSED(x) ((void)(x))
@@ -172,11 +187,8 @@
         (a) = (b);                                                             \
         (b) = _tmp;                                                            \
     } while (0)
-#if defined(__GNUC__) || defined(__clang__)
-#    define WEN_UNREACHABLE() __builtin_unreachable()
-#else
-#    define WEN_UNREACHABLE() ((void)0)
-#endif
+#define WEN_TODO(message) do { fprintf(stderr, "%s:%d: TODO: %s\n", __FILE__, __LINE__, message); abort(); } while(0)
+#define WEN_UNREACHABLE(message) do { fprintf(stderr, "%s:%d: UNREACHABLE: %s\n", __FILE__, __LINE__, message); abort(); } while(0)
 
 // Result codes returned by wen functions.
 typedef enum {
@@ -225,7 +237,13 @@ typedef struct {
     unsigned char *base;
     unsigned long capacity;
     unsigned long used;
+    unsigned owns_memory : 1;
 } wen_arena;
+
+// A snapshot of the arena state.
+//
+// Used to roll back temporary allocations.
+typedef unsigned long wen_arena_snapshot;
 
 // Transport abstraction used by wen.
 //
@@ -243,6 +261,7 @@ typedef struct {
     const void *data;
     unsigned long len;
     unsigned flags;
+    wen_arena_snapshot snapshot;
 } wen_slice;
 
 // Metadata for a decoded wire frame.
@@ -267,6 +286,13 @@ typedef struct {
     } as;
 } wen_event;
 
+// Status returned by a protocol handshake.
+typedef enum {
+    WEN_HANDSHAKE_INCOMPLETE = 0,
+    WEN_HANDSHAKE_COMPLETE,
+    WEN_HANDSHAKE_FAILED
+} wen_handshake_status;
+
 // Interface implemented by wire-level protocols.
 //
 // WebSocket is provided as one such codec.
@@ -274,16 +300,29 @@ typedef struct wen_codec {
     const char *name;
 
     // Performs protocol-specific handshake.
-    wen_result (*handshake)(void *codec_state, const void *in,
-                            unsigned long in_len, void *out,
-                            unsigned long out_cap, unsigned long *out_len);
+    wen_handshake_status (*handshake)(void *codec_state,
+                                      const void *in, unsigned long in_len, 
+                                      unsigned long *consumed, void *out,
+                                      unsigned long out_cap, unsigned long *out_len);
 
     // Consumes raw bytes and produces events.
+    //
+    // NOTE: decode() must NOT consume or assume ownership of input bytes.
+    // The input buffer remains owned by wen and will only be advanced
+    // when a slice is emitted.
     wen_result (*decode)(void *codec_state, const void *data, unsigned long len);
 
     // Encodes an outgoing message or control frame.
-    wen_result (*encode)(void *codec_state, unsigned opcode, const void *data, unsigned long len);
+    wen_result (*encode)(void *codec_state, unsigned opcode, const void *data, unsigned long len,
+                         void *out, unsigned long out_cap, unsigned long *out_len);
 } wen_codec;
+
+// Fixed-capacity ring buffer for queued events.
+typedef struct {
+    wen_event q[WEN_EVENT_QUEUE_CAP];
+    unsigned head;
+    unsigned tail;
+} wen_event_queue;
 
 // Represents a single wire connection.
 //
@@ -302,7 +341,11 @@ typedef struct wen_link {
     void *codec_state;
 
     void *user_data;
+    wen_event_queue evq;
     wen_arena arena;
+
+    bool slice_outstanding;
+    bool close_queued;
 } wen_link;
 
 // WebSocket protocol GUID used during the handshake.
@@ -326,8 +369,9 @@ WENDEF void wen_link_attach_codec(wen_link *link, const wen_codec *codec, void *
 
 // Polls for the next available event.
 //
-// Returns non-zero if an event was produced.
-WENDEF int wen_poll(wen_link *link, wen_event *ev);
+// Returns true if an event was produced.
+// When WEN_NO_MALLOC is enabled, the user must call wen_arena_bind() before polling.
+WENDEF bool wen_poll(wen_link *link, wen_event *ev);
 
 // Releases a slice previously returned by wen_poll().
 WENDEF void wen_release(wen_link *link, wen_slice slice);
@@ -336,10 +380,20 @@ WENDEF void wen_release(wen_link *link, wen_slice slice);
 WENDEF wen_result wen_send(wen_link *link, unsigned opcode, const void *data, unsigned long len);
 
 // Initiates a clean protocol-level close.
-WENDEF wen_result wen_close(wen_link *link, unsigned code);
+WENDEF wen_result wen_close(wen_link *link, unsigned code, unsigned opcode);
 
-// Reset wen_link buffers.
+// Clears internal RX and TX buffer lengths without touching memory
 WENDEF void wen_link_reset_buffers(wen_link *link);
+
+// Pushes an event onto the event queue.
+//
+// Returns true on success, zero if the false is full.
+WENDEF bool wen_evq_push(wen_event_queue *q, const wen_event *ev);
+
+// Pops the next event from the event queue.
+//
+// Returns true if an event was returned, false if the queue is empty.
+WENDEF bool wen_evq_pop(wen_event_queue *q, wen_event *ev);
 
 #define WEN_STATIC_ASSERT(cond, name) typedef char wen_static_assert_##name[(cond) ? 1 : -1]
 
@@ -347,11 +401,6 @@ WEN_STATIC_ASSERT(WEN_RX_BUFFER >= 1024, rx_buffer_too_small);
 WEN_STATIC_ASSERT(WEN_TX_BUFFER >= 1024, tx_buffer_too_small);
 
 //////////////////////////////////////////////////////////////////////////////
-
-// A snapshot of the arena state.
-//
-// Used to roll back temporary allocations.
-typedef unsigned long wen_arena_snapshot;
 
 // Returns the number of bytes remaining in the arena.
 #define WEN_ARENA_REMAINING(a) ((a)->capacity - (a)->used)
@@ -413,23 +462,33 @@ WENDEF wen_result wen_link_init(wen_link *link, wen_io io) {
     return WEN_OK;
 }
 
-
 WENDEF void wen_link_attach_codec(wen_link *link, const wen_codec *codec, void *codec_state)
 {
     if (!link || !codec) return;
+    WEN_ASSERT(codec->handshake && "codec must provide handshake()");
 
     link->codec       = codec;
     link->codec_state = codec_state;
     link->state       = WEN_LINK_HANDSHAKE;
 }
 
-WENDEF int wen_poll(wen_link *link, wen_event *ev)
+WENDEF bool wen_poll(wen_link *link, wen_event *ev)
 {
-    long nread;
-
     if (!link || !ev) return false;
+    if (wen_evq_pop(&link->evq, ev)) {
+        if (ev->type == WEN_EV_CLOSE && link->state != WEN_LINK_CLOSED) {
+            link->state = WEN_LINK_CLOSED;
+            link->close_queued = false;
 
-    ev->type = WEN_EV_NONE;
+#ifndef WEN_NO_MALLOC
+            if (link->arena.owns_memory && link->arena.base)
+                free(link->arena.base);
+#endif
+
+            link->arena.base = NULL;
+        }
+        return true;
+    }
 
     if (link->state == WEN_LINK_CLOSED) return false;
 
@@ -439,46 +498,100 @@ WENDEF int wen_poll(wen_link *link, wen_event *ev)
         return true;
     }
 
-    // TODO: Real handshake phase
-    if (link->state == WEN_LINK_HANDSHAKE) {
-        link->state = WEN_LINK_OPEN;
-        ev->type = WEN_EV_OPEN;
-        return true;
-    }
-
-    nread = link->io.read(
-        link->io.user,
-        link->rx_buf + link->rx_len,
-        WEN_RX_BUFFER - link->rx_len
-    );
-
-    if (nread < 0) {
-        ev->type = WEN_EV_ERROR;
-        ev->as.error = WEN_ERR_IO;
-        return true;
-    }
-
-    if (nread == 0) {
-        link->state = WEN_LINK_CLOSED;
-        ev->type = WEN_EV_CLOSE;
-        ev->as.close_code = 0;
-        return true;
-    }
-
-    link->rx_len += (unsigned long)nread;
-
-    // Decode is codec-specific and opaque
-    if (link->codec->decode) {
-        // TODO: slice_length
-        unsigned long slice_length = link->rx_len;
-        ev->as.slice.data = wen_arena_alloc(&link->arena, slice_length);
-        if (!ev->as.slice.data) {
+    // Flush pending TX
+    if (link->tx_len != 0) {
+        long nw = link->io.write(link->io.user, link->tx_buf, link->tx_len);
+        if (nw < 0) {
             ev->type = WEN_EV_ERROR;
             ev->as.error = WEN_ERR_IO;
             return true;
         }
-        wen_result r = link->codec->decode(link->codec_state, ev->as.slice.data, slice_length);
+        if ((unsigned long)nw < link->tx_len) {
+            memmove(link->tx_buf, link->tx_buf + nw, link->tx_len - (unsigned long)nw);
+            link->tx_len -= (unsigned long)nw;
+        } else {
+            link->tx_len = 0;
+        }
+        return false;
+    }
 
+    // Single RX read
+    if (link->rx_len < WEN_RX_BUFFER) {
+        long nread = link->io.read(link->io.user, link->rx_buf + link->rx_len, WEN_RX_BUFFER - link->rx_len);
+
+        if (nread < 0) {
+            ev->type = WEN_EV_ERROR;
+            ev->as.error = WEN_ERR_IO;
+            return true;
+        }
+
+        if (nread == 0) {
+            if (link->state < WEN_LINK_CLOSING)
+                link->state = WEN_LINK_CLOSING;
+
+            if (link->tx_len != 0 || link->slice_outstanding)
+                return false;
+
+            if (!link->close_queued) {
+                wen_event cev = { .type = WEN_EV_CLOSE };
+                (void)wen_evq_push(&link->evq, &cev);
+                link->close_queued = true;
+            }
+
+            return true;
+        }
+
+        link->rx_len += (unsigned long)nread;
+    }
+
+    // TOOD: Refactor this to its own function
+    // BEGIN HANDSHAKE
+    if (link->state == WEN_LINK_HANDSHAKE) {
+        unsigned long consumed = 0;
+        unsigned long out_len = 0;
+
+        wen_handshake_status hs =
+            link->codec->handshake(
+                link->codec_state,
+                link->rx_buf, link->rx_len,
+                &consumed,
+                link->tx_buf, WEN_TX_BUFFER,
+                &out_len);
+
+        if (out_len) {
+            // if (out_len > WEN_TX_BUFFER) {
+            //     ev->type = WEN_EV_ERROR;
+            //     ev->as.error = WEN_ERR_OVERFLOW;
+            //     return true;
+            // }
+            // memcpy(link->tx_buf, link->tx_buf, out_len);
+            link->tx_len = out_len;
+        }
+
+        memmove(link->rx_buf, link->rx_buf + consumed, link->rx_len - consumed);
+        link->rx_len -= consumed;
+
+        if (hs == WEN_HANDSHAKE_COMPLETE) {
+            link->state = WEN_LINK_OPEN;
+            ev->type = WEN_EV_OPEN;
+            return true;
+        }
+
+        if (hs == WEN_HANDSHAKE_FAILED) {
+            ev->type = WEN_EV_ERROR;
+            ev->as.error = WEN_ERR_PROTOCOL;
+            return true;
+        }
+
+        return false;
+    }
+    // END HANDSHAKE
+
+    unsigned long slice_length = WEN_MIN(link->rx_len, WEN_MAX_SLICE);
+
+    // Decode is codec-specific and opaque
+    if (link->codec->decode) {
+        wen_result r = link->codec->decode(link->codec_state, link->rx_buf, slice_length);
         if (r != WEN_OK) {
             ev->type = WEN_EV_ERROR;
             ev->as.error = r;
@@ -486,17 +599,51 @@ WENDEF int wen_poll(wen_link *link, wen_event *ev)
         }
     }
 
-    // TODO: slice/frame queue
+    WEN_ASSERT(!link->slice_outstanding && "wen_poll: previous slice not released");
+    wen_arena_snapshot snap = link->arena.used;
+    void *dst = wen_arena_alloc(&link->arena, slice_length);
+    if (!dst) {
+        ev->type = WEN_EV_ERROR;
+        ev->as.error = WEN_ERR_OVERFLOW;
+        return true;
+    }
+
+    memcpy(dst, link->rx_buf, slice_length);
+
+    wen_event sev = {
+        .type              = WEN_EV_SLICE,
+        .as.slice.data     = dst,
+        .as.slice.len      = slice_length,
+        .as.slice.flags    = WEN_SLICE_BEGIN | WEN_SLICE_END,
+        .as.slice.snapshot = snap,
+    };
+
+    // Enqueue event
+    if (!wen_evq_push(&link->evq, &sev)) {
+        wen_arena_reset(&link->arena, snap);
+
+        ev->type = WEN_EV_ERROR;
+        ev->as.error = WEN_ERR_OVERFLOW;
+        return true;
+    }
+
+    memmove(link->rx_buf,
+            link->rx_buf + slice_length,
+            link->rx_len - slice_length);
+    link->rx_len -= slice_length;
+    link->slice_outstanding = true;
+
     return false;
 }
 
-WENDEF void wen_release(wen_link *link, wen_slice slice) {
-    WEN_UNUSED(slice);
-    if (!link) return;
+WENDEF void wen_release(wen_link *link, wen_slice slice)
+{
+    WEN_ASSERT(link && "wen_release: link is NULL");
+    WEN_ASSERT(link->slice_outstanding && "wen_release called with no outstanding slice");
 
-    wen_arena_reset(&link->arena, link->arena.used);
+    wen_arena_reset(&link->arena, slice.snapshot);
+    link->slice_outstanding = false;
 }
-
 
 WENDEF wen_result wen_send(wen_link *link, unsigned opcode, const void *data, unsigned long len)
 {
@@ -504,30 +651,60 @@ WENDEF wen_result wen_send(wen_link *link, unsigned opcode, const void *data, un
     if (!link->codec->encode)  return WEN_ERR_UNSUPPORTED;
     if (link->tx_len != 0)     return WEN_ERR_STATE;
 
-    wen_result r = link->codec->encode(link->codec_state, opcode, data, len);
+    unsigned long out_len = 0;
+
+    wen_result r = link->codec->encode(
+        link->codec_state,
+        opcode,
+        data,
+        len,
+        link->tx_buf,
+        WEN_TX_BUFFER,
+        &out_len);
 
     if (r != WEN_OK) return r;
 
-    long nwritten = link->io.write(link->io.user, link->tx_buf, link->tx_len);
-    if (nwritten < 0 || (unsigned long)nwritten != link->tx_len)
-        return WEN_ERR_IO;
-
-    link->tx_len = 0;
+    link->tx_len = out_len;
     return WEN_OK;
 }
 
-WENDEF wen_result wen_close(wen_link *link, unsigned code) {
+WENDEF wen_result wen_close(wen_link *link, unsigned code, unsigned opcode)
+{
     if (!link) return WEN_ERR_STATE;
-    if (link->state == WEN_LINK_CLOSED) return WEN_OK;
+    if (link->state >= WEN_LINK_CLOSED) return WEN_OK;
+    if (link->tx_len != 0) return WEN_ERR_STATE;
 
     link->state = WEN_LINK_CLOSING;
-    link->state = WEN_LINK_CLOSED;
+    if (link->codec && link->codec->encode) {
+        unsigned long out_len = 0;
+        if (link->codec->encode(
+                link->codec_state,
+                opcode,
+                &code, sizeof(code),
+                link->tx_buf, WEN_TX_BUFFER,
+                &out_len) == WEN_OK) {
+            link->tx_len = out_len;
+        }
+    }
 
-    free(link->arena.base);
-    link->arena.base = NULL;
-
-    WEN_UNUSED(code);
     return WEN_OK;
+}
+
+WENDEF bool wen_evq_push(wen_event_queue *q, const wen_event *ev)
+{
+    unsigned next = (q->tail + 1) % WEN_EVENT_QUEUE_CAP;
+    if (next == q->head) return 0;
+    q->q[q->tail] = *ev;
+    q->tail = next;
+    return 1;
+}
+
+WENDEF bool wen_evq_pop(wen_event_queue *q, wen_event *ev)
+{
+    if (q->head == q->tail) return 0;
+    *ev = q->q[q->head];
+    q->head = (q->head + 1) % WEN_EVENT_QUEUE_CAP;
+    return 1;
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -536,19 +713,34 @@ WENDEF wen_result wen_arena_init(wen_arena *arena, unsigned long size)
 {
     if (!arena || size == 0) return WEN_ERR_STATE;
 
-    arena->base = (unsigned char *)malloc(size);
-    if (!arena->base) return WEN_ERR_IO;
-
+#ifdef WEN_NO_MALLOC
+    arena->base = NULL;
     arena->capacity = size;
     arena->used = 0;
+    arena->owns_memory = 0;
+#else
+    arena->base = (unsigned char *)malloc(size);
+    if (!arena->base) return WEN_ERR_IO;
+    arena->capacity = size;
+    arena->used = 0;
+    arena->owns_memory = 1;
+#endif
 
     return WEN_OK;
 }
 
+WENDEF void wen_arena_bind(wen_arena *arena, void *mem, unsigned long size)
+{
+    arena->base = (unsigned char *)mem;
+    arena->capacity = size;
+    arena->used = 0;
+}
+
 WENDEF void wen_arena_reset(wen_arena *a, wen_arena_snapshot mark)
 {
+    WEN_ASSERT(mark <= a->used && "wen_arena_reset: invalid snapshot");
     if (mark > a->used) {
-        WEN_UNREACHABLE();
+        WEN_UNREACHABLE("wen_arena_reset");
         return;
     }
 
@@ -557,7 +749,7 @@ WENDEF void wen_arena_reset(wen_arena *a, wen_arena_snapshot mark)
 
 WENDEF void *wen_arena_alloc(wen_arena *a, unsigned long size)
 {
-    if (size == 0) return NULL;
+    if (!a || !a->base || size == 0) return NULL;
  
     unsigned long aligned_used = WEN_ALIGN_UP(a->used, WEN_ARENA_ALIGN);
     unsigned long aligned_size = WEN_ALIGN_UP(size, WEN_ARENA_ALIGN);
