@@ -1,6 +1,4 @@
 #ifdef TEST
-#include <stdio.h>
-
 typedef struct {
     unsigned char in[1024];
     unsigned long in_len;
@@ -25,7 +23,7 @@ static long fake_read(void *user, void *buf, unsigned long len)
     }
 
     unsigned long remaining = io->in_len - io->in_pos;
-    if (remaining == 0) return -1;
+    if (remaining == 0) return 0;
 
     unsigned long n = WEN_MIN(len, remaining);
     memcpy(buf, io->in + io->in_pos, n);
@@ -37,17 +35,15 @@ static long fake_read(void *user, void *buf, unsigned long len)
 static long fake_write(void *user, const void *buf, unsigned long len)
 {
     fake_io *io = user;
-
     if (io->closed) return -1;
-    if (len > sizeof(io->out) - io->out_len) return -1;
+    ASSERTN(len + io->out_len <= sizeof(io->out));
 
     memcpy(io->out + io->out_len, buf, len);
     io->out_len += len;
-
     return (long)len;
 }
 
-static wen_handshake_status null_handshake(void *codec_state, const void *in, unsigned long in_len,
+static wen_handshake_status fake_handshake(void *codec_state, const void *in, unsigned long in_len,
                                            unsigned long *consumed,
                                            void *out, unsigned long out_cap, unsigned long *out_len)
 {
@@ -68,10 +64,12 @@ static wen_handshake_status null_handshake(void *codec_state, const void *in, un
 }
 
 
-static void fake_feed(fake_io *io, const void *data, unsigned long len)
+static void fake_feed(fake_io *io, unsigned opcode, const unsigned char *payload, unsigned long len)
 {
-    ASSERT(len <= sizeof(io->in) - io->in_len);
-    memcpy(io->in + io->in_len, data, len);
+    /* ASSERT(len <= 125);                        // only simple frames for test */
+    io->in[io->in_len++] = 0x80 | opcode;      // FIN=1 + opcode
+    io->in[io->in_len++] = (unsigned char)len; // no mask
+    memcpy(io->in + io->in_len, payload, len);
     io->in_len += len;
 }
 
@@ -80,31 +78,30 @@ static void fake_close(fake_io *io)
     io->closed = 1;
 }
 
-static wen_result null_decode(void *state, const void *data, unsigned long len) {
+static wen_result fake_decode(void *state, const void *data, unsigned long len) {
     WEN_UNUSED(state);
     WEN_UNUSED(data);
     WEN_UNUSED(len);
     return WEN_OK;
 }
 
-static wen_result null_encode(void *codec_state, unsigned opcode, const void *data, unsigned long len,
+static wen_result fake_encode(void *codec_state, unsigned opcode, const void *data, unsigned long len,
                               void *out, unsigned long out_cap, unsigned long *out_len) {
     WEN_UNUSED(codec_state);
-    WEN_UNUSED(opcode);
-    WEN_UNUSED(data);
-    WEN_UNUSED(len);
-    WEN_UNUSED(out);
-    WEN_UNUSED(out_cap);
-
-    *out_len = 0;
+    if (len > 125) return WEN_ERR_IO;
+    unsigned char *b = out;
+    b[0] = 0x80 | (unsigned char)opcode;
+    b[1] = (unsigned char)len;
+    memcpy(b + 2, data, len);
+    *out_len = 2 + len;
     return WEN_OK;
 }
 
-static const wen_codec null_codec = {
-    .name = "null",
-    .handshake = null_handshake,
-    .decode = null_decode,
-    .encode = null_encode
+static const wen_codec fake_codec = {
+    .name = "fake",
+    .handshake = fake_handshake,
+    .decode = fake_decode,
+    .encode = fake_encode
 };
 
 static void test_fake_ws(void)
@@ -122,7 +119,7 @@ static void test_fake_ws(void)
     ASSERT(wen_link_init(&link, io) == WEN_OK);
     printf("Link initialized.\n");
 
-    wen_link_attach_codec(&link, &null_codec, NULL);
+    wen_link_attach_codec(&link, &fake_codec, NULL);
     printf("Codec attached.\n");
 
     while (!wen_poll(&link, &ev));
@@ -130,7 +127,7 @@ static void test_fake_ws(void)
     ASSERT(ev.type == WEN_EV_OPEN);
     printf("Connection opened.\n");
 
-    fake_feed(&fio, "hello", 5);
+    fake_feed(&fio, WEN_WS_OP_TEXT, (unsigned char *)"hello", 5);
     while (!wen_poll(&link, &ev));
 
     ASSERT(ev.type == WEN_EV_SLICE);

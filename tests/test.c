@@ -17,7 +17,7 @@ static int current_test_failed = 0;
 
 #define TEST_FAIL(msg)                                                         \
     do {                                                                       \
-        fprintf(stderr, C_RED C_BOLD "FAIL   " C_RESET " %s:%d: %s\n",          \
+        fprintf(stderr, C_RED C_BOLD "FAIL   " C_RESET " %s:%d: %s\n",         \
                 __FILE__, __LINE__, msg);                                      \
         current_test_failed = 1;                                               \
         return;                                                                \
@@ -27,7 +27,7 @@ static int current_test_failed = 0;
     do {                                                                       \
         if (!(cond)) {                                                         \
             fprintf(stderr,                                                    \
-                    C_RED C_BOLD "ASSERT " C_RESET                              \
+                    C_RED C_BOLD "ASSERT " C_RESET                             \
                                  " %s:%d: assertion failed: %s\n",             \
                     __FILE__, __LINE__, #cond);                                \
             current_test_failed = 1;                                           \
@@ -35,11 +35,23 @@ static int current_test_failed = 0;
         }                                                                      \
     } while (0)
 
+#define ASSERTN(cond)                                                          \
+    do {                                                                       \
+        if (!(cond)) {                                                         \
+            fprintf(stderr,                                                    \
+                    C_RED C_BOLD "ASSERT " C_RESET                             \
+                                 " %s:%d: assertion failed: %s\n",             \
+                    __FILE__, __LINE__, #cond);                                \
+            current_test_failed = 1;                                           \
+            return -1;                                                         \
+        }                                                                      \
+    } while (0)
+
 #define EXPECT(cond)                                                           \
     do {                                                                       \
         if (!(cond)) {                                                         \
             fprintf(stderr,                                                    \
-                    C_YELLOW C_BOLD "WARN   " C_RESET                           \
+                    C_YELLOW C_BOLD "WARN   " C_RESET                          \
                                     " %s:%d: expectation failed: %s\n",        \
                     __FILE__, __LINE__, #cond);                                \
             current_test_failed = 1;                                           \
@@ -49,8 +61,7 @@ static int current_test_failed = 0;
 #define WEN_ASSERT(cond)                                                       \
     do {                                                                       \
         if (!(cond)) {                                                         \
-            fprintf(stderr,                                                    \
-                    C_YELLOW C_BOLD "ASSERT " C_RESET " %s:%d: %s\n",        \
+            fprintf(stderr, C_YELLOW C_BOLD "ASSERT " C_RESET " %s:%d: %s\n",  \
                     __FILE__, __LINE__, #cond);                                \
         }                                                                      \
     } while (0)
@@ -61,16 +72,13 @@ static int current_test_failed = 0;
 
 static bool is_newer(const char *a, const char *b) {
     struct stat sa, sb;
-    if (stat(a, &sa) != 0)
-        return false;
-    if (stat(b, &sb) != 0)
-        return true;
-    return sa.st_mtime > sb.st_mtime;
+    if (stat(a, &sa) != 0) return false;
+    if (stat(b, &sb) != 0) return true;
+    return sa.st_mtime != sb.st_mtime;
 }
 
 static void rebuild_self(const char *src, const char *exe) {
-    if (!is_newer(src, exe))
-        return;
+    if (is_newer(src, exe)) return;
 
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
@@ -93,10 +101,10 @@ static void rebuild_self(const char *src, const char *exe) {
 #include "test_arena_alloc_and_reset.c"
 #include "test_decode_error_becomes_event.c"
 #include "test_evq_fifo.c"
-#include "test_remote_close_generates_event_once.c"
 #include "test_slice_must_be_released.c"
-#include "test_slice_size_limit.c"
+#include "test_remote_close_generates_event_once.c"
 #include "test_tx_flush_before_rx.c"
+#include "test_slice_size_limit.c"
 
 /* Runner */
 
@@ -118,11 +126,11 @@ static int tests_pass = 0;
                                                                                \
         tests_run++;                                                           \
         if (current_test_failed) {                                             \
-            printf(C_RED C_BOLD "FAIL   " C_RESET " %s (%.2f ms)\n", #fn,     \
+            printf(C_RED C_BOLD "FAIL   " C_RESET " %s (%.2f ms)\n", #fn,      \
                    _ms);                                                       \
         } else {                                                               \
             tests_pass++;                                                      \
-            printf(C_GREEN C_BOLD "OK     " C_RESET " %s (%.2f ms)\n", #fn,   \
+            printf(C_GREEN C_BOLD "OK     " C_RESET " %s (%.2f ms)\n", #fn,    \
                    _ms);                                                       \
         }                                                                      \
                                                                                \
@@ -148,13 +156,13 @@ int main(int, char *argv[]) {
                   "\n\n");
 
     RUN_TEST(test_fake_ws);
-    RUN_TEST(test_event_queue_fifo);
     RUN_TEST(test_arena_alloc_and_reset);
-    RUN_TEST(test_slice_must_be_released);
-    RUN_TEST(test_tx_flush_before_rx);
-    RUN_TEST(test_remote_close_generates_event_once);
     RUN_TEST(test_decode_error_becomes_event);
-    /* RUN_TEST(test_slice_size_limit); */
+    RUN_TEST(test_event_queue_fifo);
+    RUN_TEST(test_slice_must_be_released);
+    RUN_TEST(test_remote_close_generates_event_once);
+    RUN_TEST(test_tx_flush_before_rx);
+    RUN_TEST(test_slice_size_limit);
 
     printf(C_BOLD "Summary:\n" C_RESET);
     printf("  Tests run:    %d\n", tests_run);

@@ -1,4 +1,4 @@
-/* wen - v0.2.0 - Public Domain - https://github.com/rinelu/wen
+/* wen - v0.2.1 - Public Domain - https://github.com/rinelu/wen
 
    wen is a deterministic, zero-allocation networking core
    focused on explicit lifetimes and user-managed I/O.
@@ -180,6 +180,7 @@
 #define WEN_UNUSED(x) ((void)(x))
 #define WEN_ARRAY_LEN(x) (sizeof(x) / sizeof((x)[0]))
 #define WEN_MIN(a, b) ((a) < (b) ? (a) : (b))
+#define WEN_MIN3(a,b,c) (((a)<(b)?(a):(b)) < (c) ? ((a)<(b)?(a):(b)) : (c))
 #define WEN_MAX(a, b) ((a) > (b) ? (a) : (b))
 #define WEN_SWAP(type, a, b)                                                   \
     do {                                                                       \
@@ -344,6 +345,7 @@ typedef struct wen_link {
     wen_event_queue evq;
     wen_arena arena;
 
+    unsigned long max_slice;
     bool slice_outstanding;
     bool close_queued;
 } wen_link;
@@ -447,10 +449,13 @@ WENDEF void wen_link_reset_buffers(wen_link *link)
 WENDEF wen_result wen_link_init(wen_link *link, wen_io io) {
     if (!link || !io.read || !io.write) return WEN_ERR_STATE;
 
+    WEN_ASSERT(io.read != NULL && io.write != NULL);
+
     memset(link, 0, sizeof(*link));
 
     link->state = WEN_LINK_INIT;
     link->io    = io;
+    link->max_slice = WEN_MAX_SLICE;
 
     unsigned long arena_size = WEN_RX_BUFFER + WEN_TX_BUFFER;
     wen_result result = wen_arena_init(&link->arena, arena_size);
@@ -512,6 +517,11 @@ WENDEF bool wen_poll(wen_link *link, wen_event *ev)
         } else {
             link->tx_len = 0;
         }
+        if (!link->close_queued && link->state >= WEN_LINK_CLOSING && !link->slice_outstanding) {
+            wen_event cev = { .type = WEN_EV_CLOSE };
+            wen_evq_push(&link->evq, &cev);
+            link->close_queued = true;
+        }
         return false;
     }
 
@@ -529,16 +539,13 @@ WENDEF bool wen_poll(wen_link *link, wen_event *ev)
             if (link->state < WEN_LINK_CLOSING)
                 link->state = WEN_LINK_CLOSING;
 
-            if (link->tx_len != 0 || link->slice_outstanding)
-                return false;
-
-            if (!link->close_queued) {
+            if (!link->close_queued && !link->slice_outstanding) {
                 wen_event cev = { .type = WEN_EV_CLOSE };
-                (void)wen_evq_push(&link->evq, &cev);
+                wen_evq_push(&link->evq, &cev);
                 link->close_queued = true;
             }
 
-            return true;
+            return false;
         }
 
         link->rx_len += (unsigned long)nread;
@@ -558,15 +565,7 @@ WENDEF bool wen_poll(wen_link *link, wen_event *ev)
                 link->tx_buf, WEN_TX_BUFFER,
                 &out_len);
 
-        if (out_len) {
-            // if (out_len > WEN_TX_BUFFER) {
-            //     ev->type = WEN_EV_ERROR;
-            //     ev->as.error = WEN_ERR_OVERFLOW;
-            //     return true;
-            // }
-            // memcpy(link->tx_buf, link->tx_buf, out_len);
-            link->tx_len = out_len;
-        }
+        if (out_len) link->tx_len = out_len;
 
         memmove(link->rx_buf, link->rx_buf + consumed, link->rx_len - consumed);
         link->rx_len -= consumed;
@@ -599,6 +598,11 @@ WENDEF bool wen_poll(wen_link *link, wen_event *ev)
         }
     }
 
+    unsigned long protocol_slice_limit = link->max_slice;
+
+    slice_length = WEN_MIN3(slice_length, protocol_slice_limit, link->rx_len);
+
+    if (slice_length == 0) return false;
     WEN_ASSERT(!link->slice_outstanding && "wen_poll: previous slice not released");
     wen_arena_snapshot snap = link->arena.used;
     void *dst = wen_arena_alloc(&link->arena, slice_length);
@@ -621,7 +625,6 @@ WENDEF bool wen_poll(wen_link *link, wen_event *ev)
     // Enqueue event
     if (!wen_evq_push(&link->evq, &sev)) {
         wen_arena_reset(&link->arena, snap);
-
         ev->type = WEN_EV_ERROR;
         ev->as.error = WEN_ERR_OVERFLOW;
         return true;
@@ -633,6 +636,7 @@ WENDEF bool wen_poll(wen_link *link, wen_event *ev)
     link->rx_len -= slice_length;
     link->slice_outstanding = true;
 
+    *ev = sev;
     return false;
 }
 

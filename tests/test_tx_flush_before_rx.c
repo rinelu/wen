@@ -8,15 +8,20 @@ static void test_tx_flush_before_rx(void)
 
     wen_io io = {.user=&fio, .read=fake_read, .write=fake_write};
     ASSERT(wen_link_init(&link, io) == WEN_OK);
-    wen_link_attach_codec(&link, &null_codec, NULL);
+    wen_link_attach_codec(&link, &fake_codec, NULL);
 
-    while (!wen_poll(&link, &ev)); // open
+    while (!wen_poll(&link, &ev)); // handshake complete, EV_OPEN
 
+    // Send a message
     ASSERT(wen_send(&link, 1, "x", 1) == WEN_OK);
-    ASSERT(link.tx_len == 0); // null_encode writes nothing
 
-    // Poll should not read new RX while TX pending
+    // TX buffer should be non-empty
+    ASSERT(link.tx_len > 0);
+
+    // Poll should flush TX first, not read RX yet
     ASSERT(!wen_poll(&link, &ev));
+    ASSERT(link.tx_len == 0);      // TX flushed
 }
+
 
 #endif /* ifdef  TEST */

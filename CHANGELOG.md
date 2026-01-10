@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.2.1 - 2026-01-10
+
+## Bug Fixes
+- Fixed wen_poll behavior when RX buffer is empty and read returns -1, which previously caused EV_ERROR events and potential segmentation faults in tests.
+- Corrected test harness fake_read to return 0 at EOF instead of -1.
+- Fixed slice handling for frames larger than WEN_MAX_SLICE to prevent arena allocation overflow.
+- Ensured wen_send correctly sets tx_len without prematurely asserting 0, aligning tests with internal TX flush behavior.
+
+## Tests & Reliability
+- Updated test_slice_size_limit to properly handle multi-slice frames exceeding WEN_MAX_SLICE.
+- Updated test_tx_flush_before_rx to check TX flush behavior without assuming immediate tx_len == 0.
+- Improved polling loops in tests to handle all event types (EV_OPEN, EV_SLICE, EV_ERROR, EV_CLOSE) correctly.
+- Minor clarifications in arena allocation assertions.
+
 ## [0.2.0] - 2026-01-10
 
 ### Added

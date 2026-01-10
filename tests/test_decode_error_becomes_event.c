@@ -6,9 +6,9 @@ static wen_result fail_decode(void *s, const void *d, unsigned long l) {
 
 static const wen_codec fail_codec = {
     .name="fail",
-    .handshake=null_handshake,
+    .handshake=fake_handshake,
     .decode=fail_decode,
-    .encode=null_encode
+    .encode=fake_encode
 };
 
 static void test_decode_error_becomes_event(void)
@@ -24,7 +24,7 @@ static void test_decode_error_becomes_event(void)
     while (!wen_poll(&link, &ev));
     ASSERT(ev.type == WEN_EV_OPEN);
 
-    fake_feed(&fio, "x", 1);
+    fake_feed(&fio, WEN_WS_OP_TEXT, (unsigned char *)"x", 1);
     while (!wen_poll(&link, &ev));
     ASSERT(ev.type == WEN_EV_ERROR);
     ASSERT(ev.as.error == WEN_ERR_PROTOCOL);
