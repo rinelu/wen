@@ -1,8 +1,5 @@
-#include <assert.h>
+#ifdef TEST
 #include <stdio.h>
-
-#define WEN_IMPLEMENTATION
-#include "../wen.h"
 
 typedef struct {
     unsigned char in[1024];
@@ -73,7 +70,7 @@ static wen_handshake_status null_handshake(void *codec_state, const void *in, un
 
 static void fake_feed(fake_io *io, const void *data, unsigned long len)
 {
-    assert(len <= sizeof(io->in) - io->in_len);
+    ASSERT(len <= sizeof(io->in) - io->in_len);
     memcpy(io->in + io->in_len, data, len);
     io->in_len += len;
 }
@@ -110,7 +107,7 @@ static const wen_codec null_codec = {
     .encode = null_encode
 };
 
-int test_fake_ws(void)
+static void test_fake_ws(void)
 {
     fake_io fio = {0};
     wen_link link;
@@ -122,7 +119,7 @@ int test_fake_ws(void)
         .write = fake_write
     };
 
-    assert(wen_link_init(&link, io) == WEN_OK);
+    ASSERT(wen_link_init(&link, io) == WEN_OK);
     printf("Link initialized.\n");
 
     wen_link_attach_codec(&link, &null_codec, NULL);
@@ -130,13 +127,13 @@ int test_fake_ws(void)
 
     while (!wen_poll(&link, &ev));
 
-    assert(ev.type == WEN_EV_OPEN);
+    ASSERT(ev.type == WEN_EV_OPEN);
     printf("Connection opened.\n");
 
     fake_feed(&fio, "hello", 5);
     while (!wen_poll(&link, &ev));
 
-    assert(ev.type == WEN_EV_SLICE);
+    ASSERT(ev.type == WEN_EV_SLICE);
     printf("Received slice: %.*s\n",
            (int)ev.as.slice.len,
            (const char *)ev.as.slice.data);
@@ -148,13 +145,11 @@ int test_fake_ws(void)
         if (!wen_poll(&link, &ev)) continue;
         if (ev.type == WEN_EV_CLOSE) break;
     }
-    assert(ev.type == WEN_EV_CLOSE);
+    ASSERT(ev.type == WEN_EV_CLOSE);
 
     printf("Connection closed.\n");
 
-    assert(wen_close(&link, 1000, WEN_WS_OP_CLOSE) == WEN_OK);
+    ASSERT(wen_close(&link, 1000, WEN_WS_OP_CLOSE) == WEN_OK);
     printf("Link shutdown complete.\n");
-
-    return 0;
 }
-
+#endif // TEST

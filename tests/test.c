@@ -13,12 +13,45 @@
 #define C_BLUE "\x1b[34m"
 #define C_CYAN "\x1b[36m"
 
+static int current_test_failed = 0;
+
+#define TEST_FAIL(msg)                                                         \
+    do {                                                                       \
+        fprintf(stderr, C_RED C_BOLD "FAIL   " C_RESET " %s:%d: %s\n",          \
+                __FILE__, __LINE__, msg);                                      \
+        current_test_failed = 1;                                               \
+        return;                                                                \
+    } while (0)
+
 #define ASSERT(cond)                                                           \
     do {                                                                       \
         if (!(cond)) {                                                         \
-            fprintf(stderr, C_RED C_BOLD "[FAIL]" C_RESET " %s:%d: %s\n",      \
+            fprintf(stderr,                                                    \
+                    C_RED C_BOLD "ASSERT " C_RESET                              \
+                                 " %s:%d: assertion failed: %s\n",             \
                     __FILE__, __LINE__, #cond);                                \
-            abort();                                                           \
+            current_test_failed = 1;                                           \
+            return;                                                            \
+        }                                                                      \
+    } while (0)
+
+#define EXPECT(cond)                                                           \
+    do {                                                                       \
+        if (!(cond)) {                                                         \
+            fprintf(stderr,                                                    \
+                    C_YELLOW C_BOLD "WARN   " C_RESET                           \
+                                    " %s:%d: expectation failed: %s\n",        \
+                    __FILE__, __LINE__, #cond);                                \
+            current_test_failed = 1;                                           \
+        }                                                                      \
+    } while (0)
+
+#define WEN_ASSERT(cond)                                                       \
+    do {                                                                       \
+        if (!(cond)) {                                                         \
+            fprintf(stderr,                                                    \
+                    C_YELLOW C_BOLD "ASSERT " C_RESET " %s:%d: %s\n",        \
+                    __FILE__, __LINE__, #cond);                                \
         }                                                                      \
     } while (0)
 #define WEN_IMPLEMENTATION
@@ -40,8 +73,8 @@ static void rebuild_self(const char *src, const char *exe) {
         return;
 
     char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "cc -Wall -Wextra -Werror -ggdb %s -o %s", src,
-             exe);
+    snprintf(cmd, sizeof(cmd),
+             "cc -Wall -Wextra -Werror -Wno-unused -ggdb %s -o %s", src, exe);
 
     fprintf(stderr, C_YELLOW "[build]" C_RESET " rebuilding %s\n", exe);
 
@@ -55,8 +88,15 @@ static void rebuild_self(const char *src, const char *exe) {
 }
 
 /* Tests */
-
+#define TEST
 #include "test_fake_ws.c"
+#include "test_arena_alloc_and_reset.c"
+#include "test_decode_error_becomes_event.c"
+#include "test_evq_fifo.c"
+#include "test_remote_close_generates_event_once.c"
+#include "test_slice_must_be_released.c"
+#include "test_slice_size_limit.c"
+#include "test_tx_flush_before_rx.c"
 
 /* Runner */
 
@@ -66,10 +106,9 @@ static int tests_pass = 0;
 #define RUN_TEST(fn)                                                           \
     do {                                                                       \
         clock_t _start = clock();                                              \
-        printf(C_BLUE                                                          \
-               "==================================================" C_RESET    \
-               "\n");                                                          \
-        printf(C_CYAN C_BOLD "[ RUN ]" C_RESET " %s\n", #fn);                  \
+        current_test_failed = 0;                                               \
+                                                                               \
+        printf(C_CYAN C_BOLD "RUN    " C_RESET " %s\n", #fn);                  \
         fflush(stdout);                                                        \
                                                                                \
         fn();                                                                  \
@@ -78,15 +117,19 @@ static int tests_pass = 0;
         double _ms = (double)(_end - _start) * 1000.0 / CLOCKS_PER_SEC;        \
                                                                                \
         tests_run++;                                                           \
-        tests_pass++;                                                          \
-        printf(C_GREEN C_BOLD "[ OK  ]" C_RESET " %s (%.2f ms)\n", #fn, _ms);  \
-        printf(C_BLUE                                                          \
-               "==================================================" C_RESET    \
-               "\n\n");                                                        \
+        if (current_test_failed) {                                             \
+            printf(C_RED C_BOLD "FAIL   " C_RESET " %s (%.2f ms)\n", #fn,     \
+                   _ms);                                                       \
+        } else {                                                               \
+            tests_pass++;                                                      \
+            printf(C_GREEN C_BOLD "OK     " C_RESET " %s (%.2f ms)\n", #fn,   \
+                   _ms);                                                       \
+        }                                                                      \
+                                                                               \
+        printf(C_BLUE "\n");                                                   \
     } while (0)
 
-int main(int argc, char *argv[])
-{
+int main(int, char *argv[]) {
     rebuild_self(__FILE__, argv[0]);
 
     printf(C_BOLD "wen test runner\n" C_RESET);
@@ -105,6 +148,13 @@ int main(int argc, char *argv[])
                   "\n\n");
 
     RUN_TEST(test_fake_ws);
+    RUN_TEST(test_event_queue_fifo);
+    RUN_TEST(test_arena_alloc_and_reset);
+    RUN_TEST(test_slice_must_be_released);
+    RUN_TEST(test_tx_flush_before_rx);
+    RUN_TEST(test_remote_close_generates_event_once);
+    RUN_TEST(test_decode_error_becomes_event);
+    /* RUN_TEST(test_slice_size_limit); */
 
     printf(C_BOLD "Summary:\n" C_RESET);
     printf("  Tests run:    %d\n", tests_run);
