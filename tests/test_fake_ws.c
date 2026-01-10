@@ -2,7 +2,7 @@
 #include <stdio.h>
 
 #define WEN_IMPLEMENTATION
-#include "wen.h"
+#include "../wen.h"
 
 typedef struct {
     unsigned char in[1024];
@@ -110,7 +110,7 @@ static const wen_codec null_codec = {
     .encode = null_encode
 };
 
-int main(void)
+int test_fake_ws(void)
 {
     fake_io fio = {0};
     wen_link link;
