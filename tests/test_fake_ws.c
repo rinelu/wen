@@ -1,6 +1,6 @@
 #ifdef TEST
 typedef struct {
-    unsigned char in[1024];
+    unsigned char in[8192];
     unsigned long in_len;
     unsigned long in_pos;
 
@@ -63,14 +63,28 @@ static wen_handshake_status fake_handshake(void *codec_state, const void *in, un
     return WEN_HANDSHAKE_COMPLETE;
 }
 
-
 static void fake_feed(fake_io *io, unsigned opcode, const unsigned char *payload, unsigned long len)
 {
-    /* ASSERT(len <= 125);                        // only simple frames for test */
-    io->in[io->in_len++] = 0x80 | opcode;      // FIN=1 + opcode
-    io->in[io->in_len++] = (unsigned char)len; // no mask
-    memcpy(io->in + io->in_len, payload, len);
-    io->in_len += len;
+    unsigned long off = 0;
+
+    while (off < len) {
+        unsigned long chunk = WEN_MIN(125, len - off);
+
+        // FIN only on last frame
+        unsigned char fin = (off + chunk == len) ? 0x80 : 0x00;
+        unsigned char op  = (off == 0) ? opcode : WEN_WS_OP_CONT;
+
+        unsigned long need = 2 + chunk;
+        ASSERT(io->in_len + need <= sizeof(io->in));
+
+        io->in[io->in_len++] = fin | (op & 0x0f);
+        io->in[io->in_len++] = (unsigned char)chunk; // no mask
+
+        memcpy(io->in + io->in_len, payload + off, chunk);
+        io->in_len += chunk;
+
+        off += chunk;
+    }
 }
 
 static void fake_close(fake_io *io)

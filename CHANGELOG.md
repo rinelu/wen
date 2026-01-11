@@ -2,15 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.2.2 - 2026-01-11
+
+### Bug Fixes
+- Fixed test failures on Windows due to platform-specific exec and I/O behavior.
+- Corrected version metadata inconsistencies introduced during the previous release.
+- Removed unused and redundant code paths discovered during test cleanup.
+
+### Tests & Reliability
+- Updated `test_slice_size_limit` to correctly handle oversized payloads.
+- Improved fake I/O helpers to enforce buffer capacity and prevent test-time memory corruption.
+- Minor test harness cleanups for cross-platform consistency.
+
 ## 0.2.1 - 2026-01-10
 
-## Bug Fixes
+### Bug Fixes
 - Fixed wen_poll behavior when RX buffer is empty and read returns -1, which previously caused EV_ERROR events and potential segmentation faults in tests.
 - Corrected test harness fake_read to return 0 at EOF instead of -1.
 - Fixed slice handling for frames larger than WEN_MAX_SLICE to prevent arena allocation overflow.
 - Ensured wen_send correctly sets tx_len without prematurely asserting 0, aligning tests with internal TX flush behavior.
 
-## Tests & Reliability
+### Tests & Reliability
 - Updated test_slice_size_limit to properly handle multi-slice frames exceeding WEN_MAX_SLICE.
 - Updated test_tx_flush_before_rx to check TX flush behavior without assuming immediate tx_len == 0.
 - Improved polling loops in tests to handle all event types (EV_OPEN, EV_SLICE, EV_ERROR, EV_CLOSE) correctly.

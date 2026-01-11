@@ -6,7 +6,7 @@ It provides a small, explicit API for working with byte streams and protocol cod
 
 ## Version
 
-Current version: **0.1.0**
+Current version: **0.2.2**
 
 The API is incomplete and may change.
 

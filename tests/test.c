@@ -3,7 +3,14 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <time.h>
-#include <unistd.h>
+
+#if defined(_WIN32)
+#    include <process.h>
+#    define test_execl(path) _execl((path), (path), NULL)
+#else
+#    include <unistd.h>
+#    define test_execl(path) execl((path), (path), NULL)
+#endif
 
 #define C_RESET "\x1b[0m"
 #define C_BOLD "\x1b[1m"
@@ -70,19 +77,14 @@ static int current_test_failed = 0;
 
 /* Self rebuild */
 
-static bool is_newer(const char *a, const char *b) {
-    struct stat sa, sb;
-    if (stat(a, &sa) != 0) return false;
-    if (stat(b, &sb) != 0) return true;
-    return sa.st_mtime != sb.st_mtime;
-}
-
-static void rebuild_self(const char *src, const char *exe) {
-    if (is_newer(src, exe)) return;
+static void rebuild_self(const char *src, const char *exe)
+{
+    if (getenv("SELF_REBUILT")) return;
 
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
-             "cc -Wall -Wextra -Werror -Wno-unused -ggdb %s -o %s", src, exe);
+             "cc -Wall -Wextra -Werror -Wno-unused -ggdb %s -o %s",
+             src, exe);
 
     fprintf(stderr, C_YELLOW "[build]" C_RESET " rebuilding %s\n", exe);
 
@@ -91,7 +93,9 @@ static void rebuild_self(const char *src, const char *exe) {
         exit(1);
     }
 
-    execl(exe, exe, NULL);
+    setenv("SELF_REBUILT", "1", 1);
+    test_execl(exe);
+    perror("execl");
     exit(1);
 }
 
