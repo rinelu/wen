@@ -1,4 +1,4 @@
-/* wen - v0.2.1 - Public Domain - https://github.com/rinelu/wen
+/* wen - v0.2.2 - Public Domain - https://github.com/rinelu/wen
 
    wen is a deterministic, zero-allocation networking core
    focused on explicit lifetimes and user-managed I/O.
@@ -89,9 +89,9 @@
 
      ## Flags
 
-        - WEN_NO_MALLOC - Disable all dynamic memory usage inside wen.
-        - WEN_DETERMINISTIC - Enforce deterministic behavior. Non-deterministic code paths become unreachable.
-        - WEN_ENABLE_WS - Enable the built-in WebSocket codec (if provided).
+        - WEN_NO_MALLOC      - Disable all dynamic memory usage inside wen.
+        - WEN_DETERMINISTIC  - Enforce deterministic behavior. Non-deterministic code paths become unreachable.
+        - WEN_ENABLE_WS      - Enable the built-in WebSocket codec (if provided).
 
      ## Size Limits
 
@@ -105,7 +105,6 @@
 #ifndef WEN_H_
 #define WEN_H_
 
-#include <unistd.h>
 #include <string.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -113,7 +112,7 @@
 
 #define WEN_VMAJOR 0
 #define WEN_VMINOR 2
-#define WEN_VPATCH 0
+#define WEN_VPATCH 2
 
 // Convert version to a single integer.
 // ex: 0.1.0 becomes 1000 (0 * 1000000 + 1 * 1000 + 0)
@@ -121,18 +120,6 @@
 #define WEN__STR_HELP(...) #__VA_ARGS__
 #define WEN_STR(...) WEN__STR_HELP(__VA_ARGS__)
 #define WEN_VSTRING WEN_STR(WEN_VMAJOR)"." WEN_STR(WEN_VMINOR)"." WEN_STR(WEN_VPATCH)
-
-// Disables all dynamic memory usage inside wen.
-#ifdef WEN_NO_MALLOC
-#endif
-
-// Enables deterministic behavior
-#ifdef WEN_DETERMINISTIC
-#endif
-
-// Enables the built-in WebSocket codec.
-#ifdef WEN_ENABLE_WS
-#endif
 
 // Maximum size of a slice returned to the user.
 #ifndef WEN_MAX_SLICE
@@ -345,7 +332,6 @@ typedef struct wen_link {
     wen_event_queue evq;
     wen_arena arena;
 
-    unsigned long max_slice;
     bool slice_outstanding;
     bool close_queued;
 } wen_link;
@@ -455,7 +441,6 @@ WENDEF wen_result wen_link_init(wen_link *link, wen_io io) {
 
     link->state = WEN_LINK_INIT;
     link->io    = io;
-    link->max_slice = WEN_MAX_SLICE;
 
     unsigned long arena_size = WEN_RX_BUFFER + WEN_TX_BUFFER;
     wen_result result = wen_arena_init(&link->arena, arena_size);
@@ -598,9 +583,7 @@ WENDEF bool wen_poll(wen_link *link, wen_event *ev)
         }
     }
 
-    unsigned long protocol_slice_limit = link->max_slice;
-
-    slice_length = WEN_MIN3(slice_length, protocol_slice_limit, link->rx_len);
+    slice_length = WEN_MIN3(slice_length, WEN_MAX_SLICE, link->rx_len);
 
     if (slice_length == 0) return false;
     WEN_ASSERT(!link->slice_outstanding && "wen_poll: previous slice not released");
