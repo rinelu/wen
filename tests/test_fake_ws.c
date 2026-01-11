@@ -101,6 +101,7 @@ static wen_result fake_decode(void *state, const void *data, unsigned long len) 
 
 static wen_result fake_encode(void *codec_state, unsigned opcode, const void *data, unsigned long len,
                               void *out, unsigned long out_cap, unsigned long *out_len) {
+    WEN_UNUSED(out_cap);
     WEN_UNUSED(codec_state);
     if (len > 125) return WEN_ERR_IO;
     unsigned char *b = out;

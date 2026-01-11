@@ -141,7 +141,8 @@ static int tests_pass = 0;
         printf(C_BLUE "\n");                                                   \
     } while (0)
 
-int main(int, char *argv[]) {
+int main(int argc, char *argv[]) {
+    WEN_UNUSED(argc);
     rebuild_self(__FILE__, argv[0]);
 
     printf(C_BOLD "wen test runner\n" C_RESET);
