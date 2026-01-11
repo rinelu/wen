@@ -4,7 +4,7 @@
 #include <sys/stat.h>
 #include <time.h>
 
-#if defined(_WIN32)
+#if defined(_WIN32) || defined (_WIN64)
 #    include <process.h>
 #    define test_execl(path) _execl((path), (path), NULL)
 #else
@@ -143,7 +143,9 @@ static int tests_pass = 0;
 
 int main(int argc, char *argv[]) {
     WEN_UNUSED(argc);
+    #ifdef REBUILD
     rebuild_self(__FILE__, argv[0]);
+    #endif
 
     printf(C_BOLD "wen test runner\n" C_RESET);
     printf(C_BLUE "--------------------------------------------------" C_RESET
