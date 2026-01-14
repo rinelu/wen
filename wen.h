@@ -1,4 +1,4 @@
-/* wen - v0.2.3 - Public Domain - https://github.com/rinelu/wen
+/* wen - v0.2.2 - Public Domain - https://github.com/rinelu/wen
 
    wen is a deterministic, zero-allocation networking core
    focused on explicit lifetimes and user-managed I/O.
@@ -112,7 +112,7 @@
 
 #define WEN_VMAJOR 0
 #define WEN_VMINOR 2
-#define WEN_VPATCH 3
+#define WEN_VPATCH 2
 
 // Convert version to a single integer.
 // ex: 0.1.0 becomes 1000 (0 * 1000000 + 1 * 1000 + 0)
@@ -225,7 +225,7 @@ typedef struct {
     unsigned char *base;
     unsigned long capacity;
     unsigned long used;
-    bool owns_memory : true;
+    unsigned owns_memory : 1;
 } wen_arena;
 
 // A snapshot of the arena state.
@@ -361,11 +361,6 @@ WENDEF void wen_link_attach_codec(wen_link *link, const wen_codec *codec, void *
 // When WEN_NO_MALLOC is enabled, the user must call wen_arena_bind() before polling.
 WENDEF bool wen_poll(wen_link *link, wen_event *ev);
 
-WENDEF unsigned wen__poll_flush_tx(wen_link *link, wen_event *ev);
-WENDEF unsigned wen__poll_read_rx(wen_link *link, wen_event *ev);
-WENDEF bool wen__poll_handshake(wen_link *link, wen_event *ev);
-WENDEF bool wen__poll_decode(wen_link *link, wen_event *ev);
-
 // Releases a slice previously returned by wen_poll().
 WENDEF void wen_release(wen_link *link, wen_slice slice);
 
@@ -470,9 +465,6 @@ WENDEF void wen_link_attach_codec(wen_link *link, const wen_codec *codec, void *
 WENDEF bool wen_poll(wen_link *link, wen_event *ev)
 {
     if (!link || !ev) return false;
-
-    // The event queue has priority.
-    // If something was already generated on a previous call, return it before doing any I/O.
     if (wen_evq_pop(&link->evq, ev)) {
         if (ev->type == WEN_EV_CLOSE && link->state != WEN_LINK_CLOSED) {
             link->state = WEN_LINK_CLOSED;
@@ -497,45 +489,28 @@ WENDEF bool wen_poll(wen_link *link, wen_event *ev)
     }
 
     // Flush pending TX
-    unsigned tx_err = wen__poll_flush_tx(link, ev);
-    if (tx_err != -1) return tx_err;
+    if (link->tx_len != 0) {
+        long nw = link->io.write(link->io.user, link->tx_buf, link->tx_len);
+        if (nw < 0) {
+            ev->type = WEN_EV_ERROR;
+            ev->as.error = WEN_ERR_IO;
+            return true;
+        }
+        if ((unsigned long)nw < link->tx_len) {
+            memmove(link->tx_buf, link->tx_buf + nw, link->tx_len - (unsigned long)nw);
+            link->tx_len -= (unsigned long)nw;
+        } else {
+            link->tx_len = 0;
+        }
+        if (!link->close_queued && link->state >= WEN_LINK_CLOSING && !link->slice_outstanding) {
+            wen_event cev = { .type = WEN_EV_CLOSE };
+            wen_evq_push(&link->evq, &cev);
+            link->close_queued = true;
+        }
+        return false;
+    }
 
     // Single RX read
-    unsigned rx_err = wen__poll_read_rx(link, ev);
-    if (rx_err != -1) return rx_err;
-
-    if (link->state == WEN_LINK_HANDSHAKE) 
-        return wen__poll_handshake(link, ev);
-
-    return wen__poll_decode(link, ev);
-}
-
-WENDEF unsigned wen__poll_flush_tx(wen_link *link, wen_event *ev)
-{
-    if (link->tx_len == 0) return -1;
-
-    long nw = link->io.write(link->io.user, link->tx_buf, link->tx_len);
-    if (nw < 0) {
-        ev->type = WEN_EV_ERROR;
-        ev->as.error = WEN_ERR_IO;
-        return true;
-    }
-    if ((unsigned long)nw < link->tx_len) {
-        memmove(link->tx_buf, link->tx_buf + nw, link->tx_len - (unsigned long)nw);
-        link->tx_len -= (unsigned long)nw;
-    } else {
-        link->tx_len = 0;
-    }
-    if (!link->close_queued && link->state >= WEN_LINK_CLOSING && !link->slice_outstanding) {
-        wen_event cev = { .type = WEN_EV_CLOSE };
-        wen_evq_push(&link->evq, &cev);
-        link->close_queued = true;
-    }
-    return false;
-}
-
-WENDEF unsigned wen__poll_read_rx(wen_link *link, wen_event *ev)
-{
     if (link->rx_len < WEN_RX_BUFFER) {
         long nread = link->io.read(link->io.user, link->rx_buf + link->rx_len, WEN_RX_BUFFER - link->rx_len);
 
@@ -560,44 +535,42 @@ WENDEF unsigned wen__poll_read_rx(wen_link *link, wen_event *ev)
 
         link->rx_len += (unsigned long)nread;
     }
-    return -1;
-}
 
-WENDEF bool wen__poll_handshake(wen_link *link, wen_event *ev)
-{
-    unsigned long consumed = 0;
-    unsigned long out_len = 0;
+    // TOOD: Refactor this to its own function
+    // BEGIN HANDSHAKE
+    if (link->state == WEN_LINK_HANDSHAKE) {
+        unsigned long consumed = 0;
+        unsigned long out_len = 0;
 
-    wen_handshake_status hs =
-        link->codec->handshake(
-            link->codec_state,
-            link->rx_buf, link->rx_len,
-            &consumed,
-            link->tx_buf, WEN_TX_BUFFER,
-            &out_len);
+        wen_handshake_status hs =
+            link->codec->handshake(
+                link->codec_state,
+                link->rx_buf, link->rx_len,
+                &consumed,
+                link->tx_buf, WEN_TX_BUFFER,
+                &out_len);
 
-    if (out_len) link->tx_len = out_len;
+        if (out_len) link->tx_len = out_len;
 
-    memmove(link->rx_buf, link->rx_buf + consumed, link->rx_len - consumed);
-    link->rx_len -= consumed;
+        memmove(link->rx_buf, link->rx_buf + consumed, link->rx_len - consumed);
+        link->rx_len -= consumed;
 
-    if (hs == WEN_HANDSHAKE_COMPLETE) {
-        link->state = WEN_LINK_OPEN;
-        ev->type = WEN_EV_OPEN;
-        return true;
+        if (hs == WEN_HANDSHAKE_COMPLETE) {
+            link->state = WEN_LINK_OPEN;
+            ev->type = WEN_EV_OPEN;
+            return true;
+        }
+
+        if (hs == WEN_HANDSHAKE_FAILED) {
+            ev->type = WEN_EV_ERROR;
+            ev->as.error = WEN_ERR_PROTOCOL;
+            return true;
+        }
+
+        return false;
     }
+    // END HANDSHAKE
 
-    if (hs == WEN_HANDSHAKE_FAILED) {
-        ev->type = WEN_EV_ERROR;
-        ev->as.error = WEN_ERR_PROTOCOL;
-        return true;
-    }
-
-    return false;
-}
-
-WENDEF bool wen__poll_decode(wen_link *link, wen_event *ev)
-{
     unsigned long slice_length = WEN_MIN(link->rx_len, WEN_MAX_SLICE);
 
     // Decode is codec-specific and opaque
@@ -612,7 +585,6 @@ WENDEF bool wen__poll_decode(wen_link *link, wen_event *ev)
 
     slice_length = WEN_MIN3(slice_length, WEN_MAX_SLICE, link->rx_len);
 
-    // Create slice event
     if (slice_length == 0) return false;
     WEN_ASSERT(!link->slice_outstanding && "wen_poll: previous slice not released");
     wen_arena_snapshot snap = link->arena.used;
@@ -732,13 +704,13 @@ WENDEF wen_result wen_arena_init(wen_arena *arena, unsigned long size)
     arena->base = NULL;
     arena->capacity = size;
     arena->used = 0;
-    arena->owns_memory = false;
+    arena->owns_memory = 0;
 #else
     arena->base = (unsigned char *)malloc(size);
     if (!arena->base) return WEN_ERR_IO;
     arena->capacity = size;
     arena->used = 0;
-    arena->owns_memory = true;
+    arena->owns_memory = 1;
 #endif
 
     return WEN_OK;
