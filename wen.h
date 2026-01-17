@@ -222,7 +222,7 @@ typedef struct {
     unsigned char *base;
     unsigned long capacity;
     unsigned long used;
-    bool owns_memory : true;
+    bool owns_memory;
 } wen_arena;
 
 // A snapshot of the arena state.
@@ -732,18 +732,13 @@ WENDEF wen_result wen_arena_init(wen_arena *arena, unsigned long size)
 {
     if (!arena || size == 0) return WEN_ERR_STATE;
 
-#ifdef WEN_NO_MALLOC
-    arena->base = NULL;
-    arena->capacity = size;
-    arena->used = 0;
-    arena->owns_memory = false;
-#else
+#ifndef WEN_NO_MALLOC
     arena->base = (unsigned char *)malloc(size);
     if (!arena->base) return WEN_ERR_IO;
-    arena->capacity = size;
-    arena->used = 0;
     arena->owns_memory = true;
 #endif
+    arena->capacity = size;
+    arena->used = 0;
 
     return WEN_OK;
 }
