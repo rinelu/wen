@@ -72,7 +72,9 @@ static int current_test_failed = 0;
                     __FILE__, __LINE__, #cond);                                \
         }                                                                      \
     } while (0)
+
 #define WEN_IMPLEMENTATION
+#define WEN_ENABLE_WS
 #include "../wen.h"
 
 /* Self rebuild */

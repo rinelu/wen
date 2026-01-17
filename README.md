@@ -1,11 +1,9 @@
-## wen
+# wen
 
 [![Stars](https://img.shields.io/github/stars/rinelu/wen?style=social)](https://github.com/rinelu/wen/stargazers)
 ![Tests](https://github.com/rinelu/wen/actions/workflows/wen.yaml/badge.svg)
 
 `wen` is a **low-level networking library written in C**, designed with explicit lifetimes and user-managed I/O. It provides a minimal, safe API for working with byte streams and building protocol codecs without hidden state or allocations.
-
-> **Early release:** API is incomplete and may change between versions. :contentReference[oaicite:0]{index=0}
 
 ## Features
 
@@ -16,7 +14,7 @@
 
 ## License
 
-This project is licensed under the terms shown in the `LICENSE` file. ([GitHub][1])
+This project is licensed under the terms shown in the `LICENSE` file.
 
 ## Contributing
 
