@@ -2,16 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.3.0 - 2026-01-17
+
+### Added
+- Internal `frame_len` tracking to support protocol-aware slice limiting.
+
+### Changed
+- Slice emission logic now respects active frame boundaries when a codec reports a frame length.
+- Slice length selection prefers remaining frame length over raw RX buffer size.
+- Transmit buffer accounting tightened to correctly append encoded output and prevent overflow.
+- All WebSocket-related code is now consistently gated behind `WEN_ENABLE_WS`.
+
+### Fixed
+- Prevented slices from exceeding frame boundaries during framed protocol decoding.
+- Corrected TX buffer growth logic to ensure `tx_len` is incremented only after successful encode.
+- Improved safety checks around transmit buffer capacity.
+
 ## 0.2.3 - 2026-01-13
 
 ### Changed
 - Refactored `wen_poll()` internals to simplify control flow and improve readability.
 - Removed `WEN_IMPLEMENTATION` define inside the header.
 - Updated README.
-
-Notes
-- This release focuses on internal cleanup and documentation updates.
-- WebSocket support is not finished.
 
 ## 0.2.2 - 2026-01-11
 

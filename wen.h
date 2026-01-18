@@ -1,4 +1,4 @@
-/* wen - v0.2.3 - Public Domain - https://github.com/rinelu/wen
+/* wen - v0.3.0 - Public Domain - https://github.com/rinelu/wen
 
    wen is a deterministic, zero-allocation networking core
    focused on explicit lifetimes and user-managed I/O.
@@ -23,7 +23,8 @@
           wen_link_init(&link, io);
           wen_link_attach_codec(&link, &my_codec, my_codec_state);
 
-          while (wen_poll(&link, &ev)) {
+          for (;;) {
+              if (!wen_poll(&link, &ev)) continue;
               switch (ev.type) {
               case WEN_EV_OPEN:
                   // connection established
@@ -53,7 +54,6 @@
      PATCH: bug fixes, no semantic changes
      MINOR: additive features, no breaking changes
      MAJOR: breaking API or semantic changes
-     v0.x.y indicates the API is still evolving.
 
    # Memory Model
 
@@ -91,7 +91,7 @@
 
         - WEN_NO_MALLOC      - Disable all dynamic memory usage inside wen.
         - WEN_DETERMINISTIC  - Enforce deterministic behavior. Non-deterministic code paths become unreachable.
-        - WEN_ENABLE_WS      - Enable the built-in WebSocket codec (if provided).
+        - WEN_ENABLE_WS      - Enable the built-in WebSocket codec.
 
      ## Size Limits
 
@@ -111,8 +111,8 @@
 #include <stdio.h>
 
 #define WEN_VMAJOR 0
-#define WEN_VMINOR 2
-#define WEN_VPATCH 3
+#define WEN_VMINOR 3
+#define WEN_VPATCH 0
 
 // Convert version to a single integer.
 // ex: 0.1.0 becomes 1000 (0 * 1000000 + 1 * 1000 + 0)
@@ -169,12 +169,7 @@
 #define WEN_MIN(a, b) ((a) < (b) ? (a) : (b))
 #define WEN_MIN3(a,b,c) (((a)<(b)?(a):(b)) < (c) ? ((a)<(b)?(a):(b)) : (c))
 #define WEN_MAX(a, b) ((a) > (b) ? (a) : (b))
-#define WEN_SWAP(type, a, b)                                                   \
-    do {                                                                       \
-        type _tmp = (a);                                                       \
-        (a) = (b);                                                             \
-        (b) = _tmp;                                                            \
-    } while (0)
+#define WEN_SWAP(type, a, b) do { type _tmp = (a); (a) = (b); (b) = _tmp; } while (0)
 #define WEN_TODO(message) do { fprintf(stderr, "%s:%d: TODO: %s\n", __FILE__, __LINE__, message); abort(); } while(0)
 #define WEN_UNREACHABLE(message) do { fprintf(stderr, "%s:%d: UNREACHABLE: %s\n", __FILE__, __LINE__, message); abort(); } while(0)
 
@@ -210,9 +205,11 @@ typedef enum {
     WEN_EV_NONE = 0,
     WEN_EV_OPEN,
     WEN_EV_SLICE,
+#ifdef WEN_ENABLE_WS
     WEN_EV_FRAME,
     WEN_EV_PING,
     WEN_EV_PONG,
+#endif // WEN_ENABLE_WS
     WEN_EV_CLOSE,
     WEN_EV_ERROR
 } wen_event_type;
@@ -225,7 +222,7 @@ typedef struct {
     unsigned char *base;
     unsigned long capacity;
     unsigned long used;
-    bool owns_memory : true;
+    bool owns_memory;
 } wen_arena;
 
 // A snapshot of the arena state.
@@ -325,6 +322,9 @@ typedef struct wen_link {
     unsigned char tx_buf[WEN_TX_BUFFER];
     unsigned long tx_len;
 
+    // bytes of current frame
+    unsigned long frame_len;
+
     const wen_codec *codec;
     void *codec_state;
 
@@ -337,15 +337,17 @@ typedef struct wen_link {
 } wen_link;
 
 // WebSocket protocol GUID used during the handshake.
-#define WEN_WS_GUID "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+#ifdef WEN_ENABLE_WS
+#    define WEN_WS_GUID "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 // WebSocket opcodes.
-#define WEN_WS_OP_CONT 0x0
-#define WEN_WS_OP_TEXT 0x1
-#define WEN_WS_OP_BINARY 0x2
-#define WEN_WS_OP_CLOSE 0x8
-#define WEN_WS_OP_PING 0x9
-#define WEN_WS_OP_PONG 0xA
+#    define WEN_WS_OP_CONT 0x0
+#    define WEN_WS_OP_TEXT 0x1
+#    define WEN_WS_OP_BINARY 0x2
+#    define WEN_WS_OP_CLOSE 0x8
+#    define WEN_WS_OP_PING 0x9
+#    define WEN_WS_OP_PONG 0xA
+#endif // WEN_ENABLE_WS
 
 // Initializes a link with the given IO backend.
 WENDEF wen_result wen_link_init(wen_link *link, wen_io io);
@@ -428,7 +430,6 @@ WENDEF void *wen_arena_alloc(wen_arena *a, unsigned long size);
 // The returned memory is zero-initialized.
 WENDEF void *wen_arena_calloc(wen_arena *a, unsigned long count, unsigned long size);
 
-#define WEN_IMPLEMENTATION
 #ifdef WEN_IMPLEMENTATION
 
 WENDEF void wen_link_reset_buffers(wen_link *link)
@@ -498,11 +499,11 @@ WENDEF bool wen_poll(wen_link *link, wen_event *ev)
 
     // Flush pending TX
     unsigned tx_err = wen__poll_flush_tx(link, ev);
-    if (tx_err != -1) return tx_err;
+    if (tx_err != (unsigned)-1) return tx_err;
 
     // Single RX read
     unsigned rx_err = wen__poll_read_rx(link, ev);
-    if (rx_err != -1) return rx_err;
+    if (rx_err != (unsigned)-1) return rx_err;
 
     if (link->state == WEN_LINK_HANDSHAKE) 
         return wen__poll_handshake(link, ev);
@@ -598,7 +599,8 @@ WENDEF bool wen__poll_handshake(wen_link *link, wen_event *ev)
 
 WENDEF bool wen__poll_decode(wen_link *link, wen_event *ev)
 {
-    unsigned long slice_length = WEN_MIN(link->rx_len, WEN_MAX_SLICE);
+    unsigned long slice_length =
+        link->frame_len ? WEN_MIN(link->frame_len, WEN_MAX_SLICE) : WEN_MIN(link->rx_len, WEN_MAX_SLICE);
 
     // Decode is codec-specific and opaque
     if (link->codec->decode) {
@@ -648,6 +650,8 @@ WENDEF bool wen__poll_decode(wen_link *link, wen_event *ev)
     link->slice_outstanding = true;
 
     *ev = sev;
+
+    if (link->frame_len) link->frame_len -= slice_length;
     return false;
 }
 
@@ -664,7 +668,7 @@ WENDEF wen_result wen_send(wen_link *link, unsigned opcode, const void *data, un
 {
     if (!link || !link->codec) return WEN_ERR_STATE;
     if (!link->codec->encode)  return WEN_ERR_UNSUPPORTED;
-    if (link->tx_len != 0)     return WEN_ERR_STATE;
+    if (link->tx_len >= WEN_TX_BUFFER) return WEN_ERR_OVERFLOW;
 
     unsigned long out_len = 0;
 
@@ -673,13 +677,13 @@ WENDEF wen_result wen_send(wen_link *link, unsigned opcode, const void *data, un
         opcode,
         data,
         len,
-        link->tx_buf,
-        WEN_TX_BUFFER,
+        link->tx_buf + link->tx_len,
+        WEN_TX_BUFFER - link->tx_len,
         &out_len);
 
     if (r != WEN_OK) return r;
 
-    link->tx_len = out_len;
+    link->tx_len += out_len;
     return WEN_OK;
 }
 
@@ -728,18 +732,13 @@ WENDEF wen_result wen_arena_init(wen_arena *arena, unsigned long size)
 {
     if (!arena || size == 0) return WEN_ERR_STATE;
 
-#ifdef WEN_NO_MALLOC
-    arena->base = NULL;
-    arena->capacity = size;
-    arena->used = 0;
-    arena->owns_memory = false;
-#else
+#ifndef WEN_NO_MALLOC
     arena->base = (unsigned char *)malloc(size);
     if (!arena->base) return WEN_ERR_IO;
-    arena->capacity = size;
-    arena->used = 0;
     arena->owns_memory = true;
 #endif
+    arena->capacity = size;
+    arena->used = 0;
 
     return WEN_OK;
 }
@@ -792,6 +791,17 @@ WENDEF void *wen_arena_calloc(wen_arena *a, unsigned long count, unsigned long s
     return ptr;
 }
 
-#endif
+#endif // WEN_IMPLEMENTATION
+
+#ifdef WEN_ENABLE_WS
+
+// static const wen_codec ws_ws_codec = {
+//     .name = "wen-ws",
+//     .handshake = wen_ws_handshake,
+//     .decode = wen_ws_decode,
+//     .encode = wen_ws_encode,
+// };
+
+#endif // WEN_ENABLE_WS
 
 #endif // WEN_H_
